@@ -1,14 +1,15 @@
 #!/usr/bin/env perl
-
+## no critic (TestingAndDebugging)
 package Gentoo::PerlMod::Version::Tool;
 BEGIN {
   $Gentoo::PerlMod::Version::Tool::AUTHORITY = 'cpan:KENTNL';
 }
 {
-  $Gentoo::PerlMod::Version::Tool::VERSION = '0.4.0';
+  $Gentoo::PerlMod::Version::Tool::VERSION = '0.5.0';
 }
 use strict;
 use warnings;
+## use critic
 
 # PODNAME: gentoo-perlmod-version.pl
 # ABSTRACT: Command line utility for translating cpan versions to gentoo equivalents.
@@ -55,16 +56,16 @@ for ( 0 .. $#ARGV ) {
   last;
 }
 for ( 0 .. $#ARGV ) {
-  next unless $ARGV[$_] =~ /^--oneshot$/;
+  next unless $ARGV[$_] eq '--oneshot';
   $oneshot = 1;
   splice @ARGV, $_, 1, ();
   last;
 }
 
 if ($oneshot) {
-  die "Too many versions given to --oneshot mode" if $#ARGV > 0;
+  croak 'Too many versions given to --oneshot mode' if $#ARGV > 0;
   my $v = gentooize_version( $ARGV[0], { lax => $lax } );
-  print $v or die "Print Error $!";
+  print $v or croak "Print Error $!";
   exit 0;
 }
 
@@ -84,6 +85,7 @@ sub map_version {
   my ( $version, $laxness ) = @_;
   print "$version => " . gentooize_version( $version, { lax => $laxness } ) or croak "Print error $!";
   print "\n" or croak "Print error $!";
+  return;
 }
 
 
@@ -98,7 +100,7 @@ gentoo-perlmod-version.pl - Command line utility for translating cpan versions t
 
 =head1 VERSION
 
-version 0.4.0
+version 0.5.0
 
 =head1 SYNOPSIS
 

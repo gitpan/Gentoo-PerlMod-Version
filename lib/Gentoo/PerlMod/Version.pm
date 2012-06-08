@@ -6,14 +6,12 @@ BEGIN {
   $Gentoo::PerlMod::Version::AUTHORITY = 'cpan:KENTNL';
 }
 {
-  $Gentoo::PerlMod::Version::VERSION = '0.4.0';
+  $Gentoo::PerlMod::Version::VERSION = '0.5.0';
 }
 
 # ABSTRACT: Convert arbitrary Perl Modules' versions into normalised Gentoo versions.
 
 use Sub::Exporter -setup => { exports => [qw( gentooize_version)] };
-use Carp;
-use List::MoreUtils qw( natatime );
 use version 0.77;
 
 
@@ -22,6 +20,9 @@ sub gentooize_version {
   my ( $perlver, $config ) = @_;
   $config ||= {};
   $config->{lax} = 0 unless defined $config->{lax};
+  if ( _env_hasopt('always_lax') ) {
+    $config->{lax} = _env_getopt('always_lax');
+  }
 
   if ( $perlver =~ /^v?[\d.]+$/ ) {
     return _lax_cleaning_0($perlver);
@@ -31,15 +32,32 @@ sub gentooize_version {
     if ( $config->{lax} > 0 ) {
       return _lax_cleaning_1($perlver);
     }
-    Carp::croak(
-      'Invalid version format (non-numeric data, either _ or -TRIAL ). Set { lax => 1 } for more permissive behaviour.');
+    return _fatal(
+      {
+        code                  => 'matches_trial_regex_nonlax',
+        config                => $config,
+        want_lax              => 1,
+        message               => 'Invalid version format (non-numeric data, either _ or -TRIAL ).',
+        message_extra_tainted => qq{ Version: >$perlver< },
+        version               => $perlver,
+      }
+    );
   }
 
   if ( $config->{lax} == 2 ) {
     return _lax_cleaning_2($perlver);
   }
 
-  Carp::croak('Invalid version format (non-numeric/ASCII data). ( set { lax => 2 } for more permissive behaviour )');
+  return _fatal(
+    {
+      code                  => 'not_decimal_or_trial',
+      config                => $config,
+      want_lax              => 2,
+      message               => 'Invalid version format (non-numeric/ASCII data).',
+      message_extra_tainted => qq{ Version: >$perlver< },
+      version               => $perlver,
+    }
+  );
 }
 
 ###
@@ -72,8 +90,15 @@ sub _char_map {
 
 sub _code_for {
   my $char = shift;
-  if ( !exists $char_map->{$char} ) {
-    Carp::croak( 'Character ' . $char . q{ ( } . ord($char) . q{) is not in the ascii-to-int translation table} );
+  if ( not exists $char_map->{$char} ) {
+    my $char_ord = ord $char;
+    return _fatal(
+      {
+        code                  => 'bad_char',
+        message               => 'A Character in the version is not in the ascii-to-int translation table.',
+        message_extra_tainted => qq{ Missing character: $char ( $char_ord )},
+      }
+    );
   }
   return $char_map->{$char};
 }
@@ -108,8 +133,9 @@ sub _ascii_to_int {
   my $string = shift;
   my @chars = split //, $string;
   my @output;
+  require List::MoreUtils;
 
-  my $iterator = natatime 2, @chars;
+  my $iterator = List::MoreUtils::natatime(2, @chars);
   while ( my @vals = $iterator->() ) {
     push @output, _enc_pair(@vals);
   }
@@ -141,7 +167,14 @@ sub _lax_cleaning_1 {
     $prereleasever = "$1";
     $isdev         = 1;
     if ( $prereleasever =~ /_/ ) {
-      Carp::croak(q{More than one _ in a version is not permitted});
+      return _fatal(
+        {
+          code                  => 'lax_multi_underscore',
+          message               => q{More than one _ in a version is not permitted},
+          message_extra_tainted => qq{ Version: >$version< },
+          version               => $version,
+        }
+      );
     }
   }
   $version = _expand_numeric($version);
@@ -195,14 +228,14 @@ sub _lax_cleaning_2 {
 #
 # Expands dotted decimal to a float, and then chunks the float.
 #
-
+# my $clean = _expand_numeric( $dirty );
+#
 sub _expand_numeric {
   my $perlver = shift;
 
   my $ver = version->parse($perlver)->normal;
 
   $ver =~ s/^v//;    # strip leading v
-                     #$ver =~ s/(?:[.]0+)*$//;    # strip excess .0 groups
 
   my @tokens = split /[.]/, $ver;
   my @out;
@@ -213,6 +246,97 @@ sub _expand_numeric {
   }
 
   return join q{.}, @out;
+}
+
+
+{
+  my $state;
+  my $env_key = 'GENTOO_PERLMOD_VERSION_OPTS';
+
+  #
+  # my $hash = _env_opts();
+  #
+  sub _env_opts {
+    return $state if defined $state;
+    $state = {};
+    return $state if not defined $ENV{$env_key};
+    my (@tokes) = split /\s+/, $ENV{$env_key};
+    for my $token (@tokes) {
+      if ( $token =~ /^([^=]+)=(.+)$/ ) {
+        $state->{"$1"} = "$2";
+      }
+      elsif ( $token =~ /^-(.+)$/ ) {
+        delete $state->{"$1"};
+      }
+      else {
+        $state->{$token} = 1;
+      }
+    }
+    return $state;
+  }
+}
+
+#
+# GENTOO_PERLMOD_VERSION=" foo=5 ";
+#
+# my $value = _env_hasopt( 'foo' );
+# ok( $value );
+#
+
+sub _env_hasopt {
+  my ($opt) = @_;
+  return exists _env_opts()->{$opt};
+}
+
+#
+# GENTOO_PERLMOD_VERSION=" foo=5 ";
+#
+# my $value = _env_getopt( 'foo' );
+# is( $value, 5 );
+#
+sub _env_getopt {
+  my ($opt) = @_;
+  return _env_opts()->{$opt};
+}
+
+#
+# _format_error({
+#   code => "some_string",
+#   message => "Some message"
+#   message_extra_tainted => "And $tainted " # extra data for non-taint-safe envs.
+#   want_lax => n # optional
+# })
+#
+sub _format_error {
+  my ($conf) = @_;
+  my $message = $conf->{message};
+  if ( exists $conf->{want_lax} ) {
+    my $lax = $conf->{want_lax};
+    $message .= qq{\n Set { lax => $lax } for more permissive behaviour. };
+  }
+  if ( _env_hasopt('taint_safe') ) {
+    return $message;
+  }
+  if ( _env_hasopt('carp_debug') ) {
+    $conf->{env_config} = _env_opts;
+    require Data::Dumper;
+    local $Data::Dumper::Indent    = 2;
+    local $Data::Dumper::Purity    = 0;
+    local $Data::Dumper::Useqq     = 1;
+    local $Data::Dumper::Terse     = 1;
+    local $Data::Dumper::Quotekeys = 0;
+    return Data::Dumper::Dumper($conf);
+  }
+  if ( exists $conf->{'message_extra_tainted'} ) {
+    $message .= $conf->{'message_extra_tainted'};
+  }
+  return $message;
+}
+
+sub _fatal {
+  my ($conf) = @_;
+  require Carp;
+  return Carp::croak( _format_error($conf) );
 }
 
 
@@ -229,7 +353,7 @@ Gentoo::PerlMod::Version - Convert arbitrary Perl Modules' versions into normali
 
 =head1 VERSION
 
-version 0.4.0
+version 0.5.0
 
 =head1 SYNOPSIS
 
@@ -334,6 +458,47 @@ A6 is thus
     10 * 36 + 6 => 366
 
 As you can see, its really nasty, and hopefully its not needed.
+
+=head1 ENVIRONMENT
+
+This module recognises the environment variable GENTOO_PERLMOD_VERSION_OPTS for a few features.
+
+These are mostly useful for system wide or user-wide policies that may be applicable for using this module, depending on where it is used.
+
+This field is split by white-space and each token has a meaning.
+
+=head2 always_lax
+
+  GENTOO_PERLMOD_VERSION_OPTS+=" always_lax=0 "
+  GENTOO_PERLMOD_VERSION_OPTS+=" always_lax=1 "
+  GENTOO_PERLMOD_VERSION_OPTS+=" always_lax=2 "
+  GENTOO_PERLMOD_VERSION_OPTS+=" always_lax   "# same as always_lax=1
+  GENTOO_PERLMOD_VERSION_OPTS+=" -always_lax  "# unset always_lax
+
+This environment setting, if specified, overrides any specification of "lax" in the code. If this specified more than once, the right-most one applies.
+
+Specifying C<-always_lax> will unset the setting, making it behave as if it had not been previously specified.
+
+=head2 taint_safe
+
+  GENTOO_PERLMOD_VERSION_OPTS+=" taint_safe  " #on
+  GENTOO_PERLMOD_VERSION_OPTS+=" -taint_safe " #off
+
+As it stands, this module only emits messages via STDOUT/STDERR when an error occurs. For diagnosis, sometimes user provided data can appear in this output.
+
+Specifying this option will remove the information as specified by the user where possible, to eliminate this risk if this is a security issue for you.
+
+It is not a guarantee of safety, but merely a tool you might find useful, depending on circumstances.
+
+=head2 carp_debug
+
+  GENTOO_PERLMOD_VERSION_OPTS+=" carp_debug " #on
+  GENTOO_PERLMOD_VERSION_OPTS+=" -carp_debug " #off
+
+Lots of information is passed to our internal carp proxy that could aid in debugging a future problem.
+To see this information instead of the simple message that is usually sent to C<Carp>, enable this option.
+
+B<Note:> As values in the hashes that would be printed can come from users, C<carp_debug> is ignored if C<taint_safe> is on.
 
 =head1 THANKS
 
